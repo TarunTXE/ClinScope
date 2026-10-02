@@ -103,6 +103,7 @@ export default function StudyWorkspacePage() {
         .select("*")
         .eq("study_id", studyId)
         .order("created_at", { ascending: false })
+        .limit(1)
         .maybeSingle();
 
       if (formError) {
@@ -216,6 +217,7 @@ export default function StudyWorkspacePage() {
           .select("id")
           .eq("study_id", studyId)
           .order("created_at", { ascending: false })
+          .limit(1)
           .maybeSingle();
 
         if (checkError) {
@@ -226,10 +228,14 @@ export default function StudyWorkspacePage() {
         }
       }
 
+      console.log("[Publish] form ID:", existingFormId);
+      console.log("[Publish] study ID:", studyId);
+      console.log("[Publish] attempting status:", targetStatus);
+
       let savedRecord: ResearchForm | null = null;
 
       if (existingFormId) {
-        // Update existing record using its Supabase UUID
+        // Update existing record explicitly using its Supabase UUID
         const { data, error: updateError } = await supabase
           .from("research_forms")
           .update({
@@ -242,8 +248,9 @@ export default function StudyWorkspacePage() {
           .select()
           .single();
 
+        console.log("[Publish] response:", data);
         if (updateError) {
-          console.error("Supabase research_forms update error:", updateError);
+          console.error("[Publish] error:", updateError);
           throw updateError;
         }
         savedRecord = data as unknown as ResearchForm;
@@ -262,8 +269,9 @@ export default function StudyWorkspacePage() {
           .select()
           .single();
 
+        console.log("[Publish] response:", data);
         if (insertError) {
-          console.error("Supabase research_forms insert error:", insertError);
+          console.error("[Publish] error:", insertError);
           throw insertError;
         }
         savedRecord = data as unknown as ResearchForm;
@@ -271,6 +279,21 @@ export default function StudyWorkspacePage() {
 
       if (!savedRecord || !savedRecord.id) {
         throw new Error("Failed to retrieve saved research form record from Supabase.");
+      }
+
+      // Re-fetch from Supabase to guarantee status persistence
+      if (targetStatus === "published") {
+        const { data: verifiedRow, error: verifyError } = await supabase
+          .from("research_forms")
+          .select("*")
+          .eq("id", savedRecord.id)
+          .single();
+
+        if (verifyError || !verifiedRow || (verifiedRow as any).status !== "published") {
+          console.error("[Publish] verification error:", verifyError || "Row status in database is not published");
+          throw new Error(verifyError?.message || "Publish verification failed in Supabase database.");
+        }
+        savedRecord = verifiedRow as unknown as ResearchForm;
       }
 
       const parsedSchema = (
@@ -671,7 +694,7 @@ export default function StudyWorkspacePage() {
                   </div>
                   <div className="p-3 rounded-lg bg-[#0b101d]/60 border border-slate-800/60">
                     <span className="text-slate-500 block mb-1">Protocol Status</span>
-                    <span className="text-amber-400 font-medium">
+                    <span className={`font-medium ${formStatus === "published" ? "text-emerald-400" : "text-amber-400"}`}>
                       {formStatus === "published" ? "Published & Active" : "Draft Design"}
                     </span>
                   </div>
