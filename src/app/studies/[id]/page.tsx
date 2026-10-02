@@ -105,49 +105,33 @@ export default function StudyWorkspacePage() {
         .order("created_at", { ascending: false })
         .maybeSingle();
 
+      if (formError) {
+        console.error("Error fetching form from Supabase:", formError);
+        throw formError;
+      }
+
       if (data) {
         const rawRecord = data as any;
         const schema = (typeof rawRecord.schema === "string"
           ? JSON.parse(rawRecord.schema)
           : rawRecord.schema) as FormSchema;
 
-        setFormRecord(rawRecord);
+        setFormRecord(rawRecord as ResearchForm);
         setCurrentSchema(schema);
         setFormStatus(rawRecord.status === "published" ? "published" : "draft");
         setIsEditingMode(rawRecord.status !== "published");
       } else {
-        // Fallback to localStorage for development resilience
-        if (typeof window !== "undefined") {
-          const localSaved = localStorage.getItem(`clinscope_form_${studyId}`);
-          if (localSaved) {
-            try {
-              const parsed = JSON.parse(localSaved);
-              setFormRecord(parsed);
-              setCurrentSchema(parsed.schema);
-              setFormStatus(parsed.status || "draft");
-              setIsEditingMode(parsed.status !== "published");
-            } catch {
-              // ignore
-            }
-          }
-        }
+        setFormRecord(null);
+        setCurrentSchema(null);
+        setFormStatus(null);
+        setIsEditingMode(false);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error("Error fetching form:", err);
-      if (typeof window !== "undefined") {
-        const localSaved = localStorage.getItem(`clinscope_form_${studyId}`);
-        if (localSaved) {
-          try {
-            const parsed = JSON.parse(localSaved);
-            setFormRecord(parsed);
-            setCurrentSchema(parsed.schema);
-            setFormStatus(parsed.status || "draft");
-            setIsEditingMode(parsed.status !== "published");
-          } catch {
-            // ignore
-          }
-        }
-      }
+      setFormRecord(null);
+      setCurrentSchema(null);
+      setFormStatus(null);
+      setIsEditingMode(false);
     } finally {
       setIsLoadingForm(false);
     }
@@ -212,67 +196,98 @@ export default function StudyWorkspacePage() {
     schemaToSave: FormSchema,
     targetStatus: "draft" | "published"
   ) => {
-    if (!studyId) return;
+    if (!studyId) {
+      throw new Error("Cannot save form: missing Study ID.");
+    }
 
     setIsSavingForm(true);
 
     try {
-      const payload = {
-        study_id: studyId,
-        title: schemaToSave.title || study?.title || "Research Form",
-        schema: schemaToSave as any,
-        status: targetStatus,
-        updated_at: new Date().toISOString(),
-      };
+      const now = new Date().toISOString();
+      const payloadTitle = schemaToSave.title || study?.title || "Research Form";
 
-      let savedRecord: any = null;
+      // Check if a form row already exists (either in local state or in Supabase)
+      let existingFormId: string | null = null;
+      if (formRecord?.id && !formRecord.id.startsWith("form_")) {
+        existingFormId = formRecord.id;
+      } else {
+        const { data: existingRow, error: checkError } = await supabase
+          .from("research_forms")
+          .select("id")
+          .eq("study_id", studyId)
+          .order("created_at", { ascending: false })
+          .maybeSingle();
 
-      try {
-        if (formRecord?.id) {
-          const { data, error: updateError } = await supabase
-            .from("research_forms")
-            .update(payload)
-            .eq("id", formRecord.id)
-            .select()
-            .single();
-
-          if (updateError) throw updateError;
-          savedRecord = data;
-        } else {
-          const { data, error: insertError } = await supabase
-            .from("research_forms")
-            .insert(payload)
-            .select()
-            .single();
-
-          if (insertError) throw insertError;
-          savedRecord = data;
+        if (checkError) {
+          console.error("Error checking existing research form:", checkError);
         }
-      } catch (dbErr) {
-        console.warn("Supabase research_forms table write skipped, syncing locally:", dbErr);
+        if (existingRow?.id) {
+          existingFormId = existingRow.id;
+        }
       }
 
-      const finalRecord: ResearchForm = savedRecord || {
-        id: formRecord?.id || `form_${Date.now()}`,
-        study_id: studyId,
-        title: payload.title,
-        schema: schemaToSave,
-        status: targetStatus,
-        created_at: formRecord?.created_at || new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
+      let savedRecord: ResearchForm | null = null;
 
-      // Persist to localStorage for client-side resilience
-      if (typeof window !== "undefined") {
-        localStorage.setItem(`clinscope_form_${studyId}`, JSON.stringify(finalRecord));
+      if (existingFormId) {
+        // Update existing record using its Supabase UUID
+        const { data, error: updateError } = await supabase
+          .from("research_forms")
+          .update({
+            title: payloadTitle,
+            schema: schemaToSave as any,
+            status: targetStatus,
+            updated_at: now,
+          })
+          .eq("id", existingFormId)
+          .select()
+          .single();
+
+        if (updateError) {
+          console.error("Supabase research_forms update error:", updateError);
+          throw updateError;
+        }
+        savedRecord = data as unknown as ResearchForm;
+      } else {
+        // Insert new record, letting PostgreSQL default gen_random_uuid() generate the UUID
+        const { data, error: insertError } = await supabase
+          .from("research_forms")
+          .insert({
+            study_id: studyId,
+            title: payloadTitle,
+            schema: schemaToSave as any,
+            status: targetStatus,
+            created_at: now,
+            updated_at: now,
+          })
+          .select()
+          .single();
+
+        if (insertError) {
+          console.error("Supabase research_forms insert error:", insertError);
+          throw insertError;
+        }
+        savedRecord = data as unknown as ResearchForm;
       }
 
-      setFormRecord(finalRecord);
-      setCurrentSchema(schemaToSave);
-      setFormStatus(targetStatus);
-      if (targetStatus === "published") {
+      if (!savedRecord || !savedRecord.id) {
+        throw new Error("Failed to retrieve saved research form record from Supabase.");
+      }
+
+      const parsedSchema = (
+        typeof savedRecord.schema === "string"
+          ? JSON.parse(savedRecord.schema)
+          : savedRecord.schema
+      ) as FormSchema;
+
+      setFormRecord(savedRecord);
+      setCurrentSchema(parsedSchema);
+      setFormStatus(savedRecord.status === "published" ? "published" : "draft");
+      if (savedRecord.status === "published") {
         setIsEditingMode(false);
       }
+    } catch (error: any) {
+      console.error("Form save/publish operation failed:", error);
+      throw error;
     } finally {
       setIsSavingForm(false);
     }
